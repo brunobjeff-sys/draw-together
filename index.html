@@ -1,0 +1,364 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DrawTogether — Infinite Whiteboard</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font:15px system-ui,sans-serif;color:#20212a;background:#f4f5f8}
+button,input{font:inherit;padding:10px;border:1px solid #d8dbe4;border-radius:9px}
+button{cursor:pointer;background:white}
+button:hover{background:#ecefff}
+.primary{background:#5146e5;color:white;border:0}
+header{display:flex;justify-content:space-between;align-items:center;
+padding:14px 20px;background:white;border-bottom:1px solid #ddd;gap:12px}
+h1{font-size:20px;margin:0}
+main{max-width:1000px;margin:35px auto;padding:16px}
+.panel{background:white;padding:20px;border-radius:15px;
+border:1px solid #e0e2ea;margin-bottom:15px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+input{max-width:100%;min-width:0}
+#app{display:none}
+#toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+padding:12px;background:white;border-bottom:1px solid #ddd}
+#canvasWrap{height:calc(100dvh - 150px);min-height:350px;
+overflow:hidden;position:relative;background-color:white;
+background-image:radial-gradient(#d6d9e4 1px,transparent 1px);
+background-size:24px 24px;touch-action:none;cursor:crosshair}
+canvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none}
+#status{font-size:13px;color:#666}
+.small{font-size:13px;color:#666}
+@media(max-width:600px){
+ main{margin:12px auto;padding:10px}
+ header{padding:12px}
+ #canvasWrap{height:calc(100dvh - 190px)}
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>✳ DrawTogether</h1>
+  <span id="who" class="small">Not signed in</span>
+</header>
+
+<main id="auth">
+  <section class="panel">
+    <h2>Draw with your friends.</h2>
+    <p>Create an account or sign in to use your saved whiteboards.</p>
+    <form id="signup" class="row">
+      <input id="newName" placeholder="Username (3–20 characters)" required
+        pattern="[A-Za-z0-9_]{3,20}" maxlength="20">
+      <input id="newEmail" type="email" placeholder="Email" required>
+      <input id="newPass" type="password" placeholder="Password (6+ characters)"
+        minlength="6" required>
+      <button class="primary">Create account</button>
+    </form>
+    <hr style="border:0;border-top:1px solid #eee;margin:22px 0">
+    <form id="login" class="row">
+      <input id="email" type="email" placeholder="Email" required>
+      <input id="pass" type="password" placeholder="Password" required>
+      <button>Sign in</button>
+    </form>
+    <p id="authMsg" role="status"></p>
+  </section>
+</main>
+
+<div id="app">
+  <div class="panel">
+    <div class="row">
+      <input id="roomName" placeholder="New board name" maxlength="60">
+      <button class="primary" id="create">+ Create room</button>
+      <input id="roomCode" placeholder="Room code">
+      <button id="join">Join room</button>
+      <button id="logout">Sign out</button>
+    </div>
+    <p id="roomStatus" role="status">Create a board or join a friend's room.</p>
+    <p class="small">Share the room code with your friends. Maximum five members is intended;
+      enable server-side enforcement before public use.</p>
+  </div>
+
+  <section id="board" style="display:none">
+    <div id="toolbar">
+      <button id="pen" class="primary">✎ Pen</button>
+      <button id="eraser">⌫ Eraser</button>
+      <label>Color <input id="color" type="color" value="#20212a"></label>
+      <label>Size <input id="size" type="range" min="1" max="30" value="3"></label>
+      <button id="minus">− Zoom</button>
+      <span id="zoom">100%</span>
+      <button id="plus">+ Zoom</button>
+      <button id="reset">Reset view</button>
+      <button id="clear" style="margin-left:auto">Clear board (host)</button>
+    </div>
+    <div id="canvasWrap">
+      <canvas id="canvas"></canvas>
+    </div>
+    <div class="panel">
+      <span id="status">Ready</span>
+      <span class="small"> · Drag to draw · Space + drag or middle mouse to pan · Scroll to zoom</span>
+    </div>
+  </section>
+</div>
+
+<script>
+const SUPABASE_URL = "PASTE_YOUR_PROJECT_URL_HERE";
+const SUPABASE_KEY = "PASTE_YOUR_PUBLISHABLE_KEY_HERE";
+const db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+const $ = id => document.getElementById(id);
+let user = null, profile = null, room = null, isHost = false;
+let channel = null, strokes = [], current = null, tool = "pen";
+let scale = 1, ox = 0, oy = 0, drawing = false, panning = false;
+let last = null, space = false, lastSaved = Promise.resolve();
+
+const canvas = $("canvas"), ctx = canvas.getContext("2d");
+const wrap = $("canvasWrap");
+
+function message(id, text) { $(id).textContent = text; }
+function say(text) { message("roomStatus", text); }
+function setAuthMsg(text) { message("authMsg", text); }
+
+function resize() {
+  const r = wrap.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.round(r.width * dpr);
+  canvas.height = Math.round(r.height * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  render();
+}
+window.addEventListener("resize", resize);
+
+function screenPoint(e) {
+  const r = canvas.getBoundingClientRect();
+  return { x: e.clientX-r.left, y: e.clientY-r.top };
+}
+function worldPoint(p) {
+  return { x: (p.x-ox)/scale, y: (p.y-oy)/scale };
+}
+function render() {
+  const r = canvas.getBoundingClientRect();
+  ctx.clearRect(0,0,r.width,r.height);
+  ctx.save();
+  ctx.translate(ox,oy);
+  ctx.scale(scale,scale);
+  for (const s of strokes) drawStroke(s);
+  if (current) drawStroke(current);
+  ctx.restore();
+  message("zoom", Math.round(scale*100)+"%");
+}
+function drawStroke(s) {
+  if (!s.points || !s.points.length) return;
+  ctx.beginPath();
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.strokeStyle = s.color;
+  ctx.lineWidth = s.width;
+  ctx.moveTo(s.points[0].x,s.points[0].y);
+  for(let i=1;i<s.points.length;i++)
+    ctx.lineTo(s.points[i].x,s.points[i].y);
+  if(s.points.length===1){
+    ctx.lineTo(s.points[0].x+0.01,s.points[0].y+0.01);
+  }
+  ctx.stroke();
+}
+function updateView() { render(); }
+function zoomAt(factor, p) {
+  const before = worldPoint(p);
+  scale = Math.max(0.1,Math.min(8,scale*factor));
+  ox = p.x-before.x*scale;
+  oy = p.y-before.y*scale;
+  updateView();
+}
+function centerPoint() {
+  const r=wrap.getBoundingClientRect();
+  return {x:r.width/2,y:r.height/2};
+}
+$("plus").onclick=()=>zoomAt(1.25,centerPoint());
+$("minus").onclick=()=>zoomAt(0.8,centerPoint());
+$("reset").onclick=()=>{scale=1;ox=0;oy=0;updateView()};
+
+$("pen").onclick=()=>{tool="pen";$("pen").classList.add("primary");$("eraser").classList.remove("primary")};
+$("eraser").onclick=()=>{tool="eraser";$("eraser").classList.add("primary");$("pen").classList.remove("primary")};
+
+canvas.addEventListener("wheel",e=>{
+  e.preventDefault();
+  zoomAt(e.deltaY<0?1.1:0.9,screenPoint(e));
+},{passive:false});
+
+window.addEventListener("keydown",e=>{if(e.code==="Space"&&!e.repeat)space=true});
+window.addEventListener("keyup",e=>{if(e.code==="Space")space=false});
+
+canvas.addEventListener("pointerdown",e=>{
+  if(!room)return;
+  canvas.setPointerCapture(e.pointerId);
+  const p=screenPoint(e);
+  if(space||e.button===1||e.button===2){
+    panning=true;last=p;return;
+  }
+  drawing=true;
+  current={points:[worldPoint(p)],
+    color:tool==="eraser"?"#ffffff":$("color").value,
+    width:Number($("size").value)/(tool==="eraser"?1:scale),
+    user_id:user.id};
+  render();
+});
+canvas.addEventListener("contextmenu",e=>e.preventDefault());
+
+canvas.addEventListener("pointermove",e=>{
+  const p=screenPoint(e);
+  if(panning&&last){
+    ox+=p.x-last.x;oy+=p.y-last.y;last=p;render();return;
+  }
+  if(!drawing||!current)return;
+  current.points.push(worldPoint(p));
+  render();
+});
+canvas.addEventListener("pointerup",finishStroke);
+canvas.addEventListener("pointercancel",finishStroke);
+
+function finishStroke(){
+  if(panning){panning=false;last=null;return}
+  if(!drawing||!current)return;
+  drawing=false;
+  const finished=current;current=null;render();
+  lastSaved=lastSaved.then(()=>saveStroke(finished)).catch(err=>{
+    message("status","Save failed: "+err.message);
+  });
+}
+async function saveStroke(s){
+  if(!room||!user)return;
+  const {error}=await db.from("strokes").insert({
+    room_id:room.id,user_id:user.id,
+    points:s.points,color:s.color,width:s.width
+  });
+  if(error)throw error;
+  message("status","Saved");
+}
+
+async function loadProfile(){
+  const {data,error}=await db.from("profiles")
+    .select("*").eq("id",user.id).maybeSingle();
+  if(error)throw error;
+  profile=data;
+  $("who").textContent=profile?.username||user.email;
+}
+async function showSession(session){
+  user=session?.user||null;
+  $("auth").style.display=user?"none":"block";
+  $("app").style.display=user?"block":"none";
+  $("who").textContent=user?(user.email||"Signed in"):"Not signed in";
+  if(!user){await leaveRoom();return}
+  try{await loadProfile()}catch(e){say("Profile error: "+e.message)}
+}
+
+$("signup").onsubmit=async e=>{
+  e.preventDefault();setAuthMsg("Creating account...");
+  const username=$("newName").value.trim();
+  const {data,error}=await db.auth.signUp({
+    email:$("newEmail").value.trim(),
+    password:$("newPass").value,
+    options:{data:{username}}
+  });
+  if(error){setAuthMsg(error.message);return}
+  if(data.user && data.session){
+    const {error:pe}=await db.from("profiles").insert({id:data.user.id,username});
+    if(pe)setAuthMsg("Account created, but username setup failed: "+pe.message);
+    else setAuthMsg("Account created!");
+  }else{
+    setAuthMsg("Check your email to confirm the account, then sign in. Profile setup may need to be completed after confirmation.");
+  }
+};
+$("login").onsubmit=async e=>{
+  e.preventDefault();setAuthMsg("Signing in...");
+  const {error}=await db.auth.signInWithPassword({
+    email:$("email").value,password:$("pass").value
+  });
+  setAuthMsg(error?error.message:"Signed in.");
+};
+$("logout").onclick=()=>db.auth.signOut();
+
+async function createRoom(){
+  if(!user)return;
+  await leaveRoom();
+  const code=Array.from(crypto.getRandomValues(new Uint8Array(6)))
+    .map(x=>"ABCDEFGHJKLMNPQRSTUVWXYZ23456789"[x%32]).join("");
+  const {data,error}=await db.from("rooms").insert({
+    code,name:$("roomName").value.trim()||"My whiteboard",host_id:user.id
+  }).select().single();
+  if(error){say(error.message);return}
+  const {error:me}=await db.from("room_members").insert({
+    room_id:data.id,user_id:user.id
+  });
+  if(me){say(me.message);return}
+  await openRoom(data);
+}
+$("create").onclick=createRoom;
+
+$("join").onclick=async()=>{
+  if(!user)return;
+  await leaveRoom();
+  const code=$("roomCode").value.trim().toUpperCase();
+  if(!code){say("Enter a room code.");return}
+  // The secure join_room RPC added in the next setup step is required.
+  const {data,error}=await db.rpc("join_room",{p_code:code});
+  if(error){say("Could not join: "+error.message);return}
+  await openRoom(data);
+};
+
+async function openRoom(data){
+  room=data;
+  isHost=room.host_id===user.id;
+  $("board").style.display="block";
+  $("clear").disabled=!isHost;
+  $("clear").title=isHost?"Clear saved strokes":"Only the host can clear";
+  $("roomCode").value=room.code;
+  say("Room: "+room.name+" · Code: "+room.code+(isHost?" · Host":""));
+  const {data:rows,error}=await db.from("strokes")
+    .select("*").eq("room_id",room.id).order("created_at");
+  if(error){say(error.message);return}
+  strokes=rows||[];
+  resize();
+  channel=db.channel("room-"+room.id)
+    .on("postgres_changes",{
+      event:"INSERT",schema:"public",table:"strokes",
+      filter:"room_id=eq."+room.id
+    },payload=>{
+      if(!strokes.some(s=>s.id===payload.new.id)){
+        strokes.push(payload.new);render();
+      }
+    })
+    .on("postgres_changes",{
+      event:"DELETE",schema:"public",table:"strokes",
+      filter:"room_id=eq."+room.id
+    },()=>reloadStrokes())
+    .subscribe();
+}
+async function reloadStrokes(){
+  if(!room)return;
+  const {data,error}=await db.from("strokes").select("*")
+    .eq("room_id",room.id).order("created_at");
+  if(!error){strokes=data||[];render()}
+}
+async function leaveRoom(){
+  if(channel){await db.removeChannel(channel);channel=null}
+  room=null;strokes=[];current=null;
+  $("board").style.display="none";
+  render();
+}
+$("clear").onclick=async()=>{
+  if(!room||!isHost)return;
+  if(!confirm("Delete every saved stroke in this room?"))return;
+  const {error}=await db.from("strokes").delete().eq("room_id",room.id);
+  if(error){say(error.message);return}
+  strokes=[];render();say("Board cleared.");
+};
+
+db.auth.onAuthStateChange((_event,session)=>{
+  setTimeout(()=>showSession(session),0);
+});
+db.auth.getSession().then(({data})=>showSession(data.session));
+</script>
+</body>
+</html>
