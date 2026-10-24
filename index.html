@@ -51,14 +51,14 @@ canvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none}
     <form id="signup" class="row">
       <input id="newName" placeholder="Username (3–20 characters)" required
         pattern="[A-Za-z0-9_]{3,20}" maxlength="20">
-      <input id="newEmail" type="email" placeholder="Email" required>
       <input id="newPass" type="password" placeholder="Password (6+ characters)"
         minlength="6" required>
       <button class="primary">Create account</button>
     </form>
     <hr style="border:0;border-top:1px solid #eee;margin:22px 0">
     <form id="login" class="row">
-      <input id="email" type="email" placeholder="Email" required>
+      <input id="loginName" placeholder="Username" required
+        pattern="[A-Za-z0-9_]{3,20}" maxlength="20">
       <input id="pass" type="password" placeholder="Password" required>
       <button>Sign in</button>
     </form>
@@ -242,38 +242,55 @@ async function loadProfile(){
     .select("*").eq("id",user.id).maybeSingle();
   if(error)throw error;
   profile=data;
-  $("who").textContent=profile?.username||user.email;
+  $("who").textContent=profile?.username||"Signed in";
 }
 async function showSession(session){
   user=session?.user||null;
   $("auth").style.display=user?"none":"block";
   $("app").style.display=user?"block":"none";
-  $("who").textContent=user?(user.email||"Signed in"):"Not signed in";
+  $("who").textContent=user?"Signed in":"Not signed in";
   if(!user){await leaveRoom();return}
   try{await loadProfile()}catch(e){say("Profile error: "+e.message)}
+}
+
+// Username-only sign-in uses an internal email-shaped login ID for Supabase Auth.
+// In Supabase, turn OFF email confirmations (Authentication -> Sign In / Providers -> Email)
+// because users are not entering a real email address.
+function authIdForUsername(username){
+  return username.trim().toLowerCase()+"@drawtogether.invalid";
 }
 
 $("signup").onsubmit=async e=>{
   e.preventDefault();setAuthMsg("Creating account...");
   const username=$("newName").value.trim();
+  const email=authIdForUsername(username);
   const {data,error}=await db.auth.signUp({
-    email:$("newEmail").value.trim(),
+    email,
     password:$("newPass").value,
     options:{data:{username}}
   });
   if(error){setAuthMsg(error.message);return}
   if(data.user && data.session){
-    const {error:pe}=await db.from("profiles").insert({id:data.user.id,username});
-    if(pe)setAuthMsg("Account created, but username setup failed: "+pe.message);
-    else setAuthMsg("Account created!");
+    const {error:pe}=await db.from("profiles").insert({
+      id:data.user.id,username
+    });
+    if(pe){
+      setAuthMsg("Account created, but saving the username failed: "+pe.message+
+        ". The username may already be taken.");
+    }else{
+      setAuthMsg("Account created! You are signed in.");
+    }
   }else{
-    setAuthMsg("Check your email to confirm the account, then sign in. Profile setup may need to be completed after confirmation.");
+    setAuthMsg("Account created, but Supabase is still asking for email confirmation. Turn off email confirmations in Supabase Authentication settings, then try again.");
   }
 };
+
 $("login").onsubmit=async e=>{
   e.preventDefault();setAuthMsg("Signing in...");
+  const username=$("loginName").value.trim();
   const {error}=await db.auth.signInWithPassword({
-    email:$("email").value,password:$("pass").value
+    email:authIdForUsername(username),
+    password:$("pass").value
   });
   setAuthMsg(error?error.message:"Signed in.");
 };
