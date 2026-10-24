@@ -296,21 +296,49 @@ $("login").onsubmit=async e=>{
 };
 $("logout").onclick=()=>db.auth.signOut();
 
-async function createRoom(){
-  if(!user)return;
+
+async function createRoom() {
+  say("Checking your sign-in...");
+
+  const { data: { user: currentUser }, error: authError } =
+    await db.auth.getUser();
+
+  if (authError || !currentUser) {
+    say("You are not signed in. Please sign out and sign in again.");
+    return;
+  }
+
+  user = currentUser;
   await leaveRoom();
-  const code=Array.from(crypto.getRandomValues(new Uint8Array(6)))
-    .map(x=>"ABCDEFGHJKLMNPQRSTUVWXYZ23456789"[x%32]).join("");
-  const {data,error}=await db.from("rooms").insert({
-    code,name:$("roomName").value.trim()||"My whiteboard",host_id:user.id
+
+  const code = Array.from(
+    crypto.getRandomValues(new Uint8Array(6))
+  ).map(x => "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"[x % 32]).join("");
+
+  const { data, error } = await db.from("rooms").insert({
+    code,
+    name: $("roomName").value.trim() || "My whiteboard",
+    host_id: currentUser.id
   }).select().single();
-  if(error){say(error.message);return}
-  const {error:me}=await db.from("room_members").insert({
-    room_id:data.id,user_id:user.id
+
+  if (error) {
+    say("Room creation failed: " + error.message);
+    return;
+  }
+
+  const { error: memberError } = await db.from("room_members").insert({
+    room_id: data.id,
+    user_id: currentUser.id
   });
-  if(me){say(me.message);return}
+
+  if (memberError) {
+    say("Room created, but joining as host failed: " + memberError.message);
+    return;
+  }
+
   await openRoom(data);
 }
+
 $("create").onclick=createRoom;
 
 $("join").onclick=async()=>{
